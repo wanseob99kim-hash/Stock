@@ -1,0 +1,57 @@
+# ─────────────────────────────────────────────────────────────
+# 투자정책서 (IPS: Investment Policy Statement)
+# 이 파일이 앱의 "헌법"입니다. 숫자를 바꾸면 앱 전체 판단이 바뀝니다.
+# 원칙: 규칙 변경은 연 1회(12월 연간 점검) 때만 합니다.
+# ─────────────────────────────────────────────────────────────
+
+version: "2026-09 초안"
+base_currency: USD        # 평가 기준 통화 (한국 주식은 원/달러 환율로 환산)
+benchmark: VOO           # 성과 비교 기준 (위성이 이것보다 못하면 위성 비중 축소 검토)
+
+# 자산군(버킷)별 목표 비중과 허용 밴드
+# tickers 에 적힌 종목은 해당 버킷으로 자동 분류됩니다.
+# 어디에도 없는 종목은 모두 "위성(satellite)"으로 분류됩니다.
+buckets:
+  core_sp500:
+    name: "코어 · S&P500"
+    target: 0.35
+    band: [0.30, 0.40]
+    tickers: [VOO, SPYM, SPLG, IVV, SPY, "360750", "379800"]   # 360750 TIGER 미국S&P500, 379800 KODEX 미국S&P500
+  core_ndx:
+    name: "코어 · 나스닥100"
+    target: 0.15
+    band: [0.10, 0.20]
+    tickers: [QQQM, QQQ, "133690", "379810"]                    # 133690 TIGER 미국나스닥100, 379810 KODEX 미국나스닥100
+  core_div:
+    name: "코어 · 배당 우량"
+    target: 0.10
+    band: [0.05, 0.15]
+    tickers: [SCHD, "446720", "458730"]                         # 국내상장 미국배당다우존스
+  core_cash:
+    name: "코어 · 현금성"
+    target: 0.10
+    band: [0.05, 0.20]
+    tickers: [SGOV, BIL, SHV, CASH]
+  satellite:
+    name: "위성 · 개별주"
+    target: 0.30
+    band: [0.20, 0.35]
+    tickers: []            # 비워두면 위 버킷에 없는 모든 종목
+
+# 운용 규칙 (기획서 3.4)
+rules:
+  drift_threshold: 0.05          # 목표 대비 ±5%p 넘으면 리밸런싱 후보
+  max_single_stock: 0.07         # 개별 종목 최대 비중 (총자산 대비)
+  max_satellite_count: 10        # 위성 종목 수 한도
+  max_sector_share: 0.50         # 한 섹터가 위성의 50% 초과 금지
+  max_stocks_per_sector: 3       # 한 섹터 내 종목 수 한도
+  correlation_threshold: 0.70    # 위성 종목 간 평균 상관계수 경고선
+  trailing_stop: 0.20            # 고점 대비 -20% → 물타기 4단계 게이트로
+  account_mdd_limit: 0.25        # 계좌 MDD -25% → 신규 위성 매수 중단
+  health_pass_score: 70          # 포트폴리오 건강 점수 합격선
+
+# 금지 상품 (매수 기록 시 차단)
+banned:
+  tickers: [TQQQ, SQQQ, QLD, QID, SSO, SDS, UPRO, SPXU, SPXL, SPXS, SOXL, SOXS,
+            TECL, TECS, TNA, TZA, UVXY, SVXY, TSLL, TSLQ, NVDL, NVDD, CONL, MSTU, MSTX]
+  name_keywords: ["레버리지", "인버스", "(H)", "2X", "3X", "Leveraged", "Inverse", "Ultra"]

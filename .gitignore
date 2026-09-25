@@ -1,0 +1,8 @@
+data/holdings.csv
+data/journal.db
+data/history.db
+data/cache/
+__pycache__/
+.venv/
+.pytest_cache/
+.env
