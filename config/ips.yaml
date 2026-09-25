@@ -48,6 +48,7 @@ rules:
   correlation_threshold: 0.70    # 위성 종목 간 평균 상관계수 경고선
   trailing_stop: 0.20            # 고점 대비 -20% → 물타기 4단계 게이트로
   account_mdd_limit: 0.25        # 계좌 MDD -25% → 신규 위성 매수 중단
+  thesis_review_days: 90         # 위성 매수 이유 점검 주기(일) — 분기 실적 주기
   health_pass_score: 70          # 포트폴리오 건강 점수 합격선
 
 # 금지 상품 (매수 기록 시 차단)

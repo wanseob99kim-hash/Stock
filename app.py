@@ -19,6 +19,7 @@ from core.ips import load_ips
 from core.journal import CHECKLIST, check_trade, compliance_rate, load_trades, realized_by_currency, save_trade
 from core.portfolio import apply_trade, bucket_weights, load_holdings, save_holdings, value_portfolio
 from core.prices import fetch_history, get_quotes
+from core.review import STATUSES, load_reviews, review_status, save_review
 
 st.set_page_config(page_title="코어-위성 포트폴리오", layout="wide")
 
@@ -52,6 +53,8 @@ valued = value_portfolio(holdings, prices, ips, usdkrw)
 bw = bucket_weights(valued, ips)
 health = health_check(valued, hist, ips)
 trades = load_trades()
+SAT_TICKERS = [t for t, b in zip(valued["ticker"], valued["bucket"]) if b == "satellite" and t != "CASH"]
+reviews = review_status(SAT_TICKERS, load_reviews(), trades, date.today(), ips.rules.get("thesis_review_days", 90))
 bench = hist[ips.benchmark].dropna() if ips.benchmark in hist else _benchmark(ips.benchmark)
 
 # 날짜별 자산 기록: 평단으로 대체된 종목이 있으면 수익률이 왜곡되므로 저장하지 않는다
@@ -66,8 +69,8 @@ if stale:
     st.warning("실시간 시세를 못 받은 종목: " + ", ".join(f"{t}({source[t]})" for t in stale)
                + " — 캐시 또는 평단으로 계산했습니다.")
 
-tab_dash, tab_perf, tab_contrib, tab_health, tab_journal, tab_hold, tab_ips = st.tabs(
-    ["대시보드", "성과 비교", "이번 달 적립", "계좌 검진", "투자일기", "보유 종목", "투자정책서"])
+tab_dash, tab_perf, tab_contrib, tab_health, tab_review, tab_journal, tab_hold, tab_ips = st.tabs(
+    ["대시보드", "성과 비교", "이번 달 적립", "계좌 검진", "매수 이유 점검", "투자일기", "보유 종목", "투자정책서"])
 
 # ── 대시보드 ────────────────────────────────────────────────
 with tab_dash:
@@ -81,6 +84,12 @@ with tab_dash:
     c3.metric("포트폴리오 건강 점수", f"{health['score']}점")
     (c3.success if health["passed"] else c3.error)("합격" if health["passed"] else "점검 필요 — 계좌 검진 탭 확인")
     c4.metric("이번 달 규칙 준수율", f"{cr:.0%}" if cr is not None else "거래 없음")
+    broken = reviews.loc[reviews["last_status"] == "깨짐", "ticker"].tolist()
+    due = reviews.loc[reviews["due"] & (reviews["last_status"] != "깨짐"), "ticker"].tolist()
+    if broken:
+        st.error("매수 이유가 깨진 종목: " + ", ".join(broken) + " — 정리를 검토하세요 (매수 이유 점검 탭)")
+    if due:
+        st.warning("매수 이유 점검할 때가 된 종목: " + ", ".join(due) + " — 매수 이유 점검 탭")
 
     st.subheader("자산군 비중: 현재 vs 목표")
     order = bw.iloc[::-1]
@@ -237,6 +246,9 @@ with tab_health:
         thesis = valued.loc[valued["ticker"] == t, "thesis"].iloc[0] or "(보유 사유 미기록)"
         with st.expander(f"{t} — 1년 고점 대비 {a['drawdown']:.0%}", expanded=True):
             st.markdown(f"**매수 당시 내러티브:** {thesis}")
+            rv = reviews[reviews["ticker"] == t]
+            if len(rv) and rv["last_review"].iloc[0]:
+                st.markdown(f"**최근 매수 이유 점검:** {rv['last_review'].iloc[0]} · {rv['last_status'].iloc[0]}")
             g1 = st.checkbox("1. 기업가치: 내가 산 이유(매출·마진·경쟁력·가이던스)가 그대로인가?", key=f"g1{t}")
             g2 = st.checkbox("2. 가격: 지금 이익 기준으로 PER 밴드 하단 근처인가? (평단 대비가 아니라)", key=f"g2{t}")
             g3 = st.checkbox("3. 차트: 저점 갱신이 멈추고 올라가는 힘이 생겼는가?", key=f"g3{t}")
@@ -251,6 +263,60 @@ with tab_health:
                 st.warning("판정: 추가매수 불가 — 비중 한도. 보유 유지.")
             else:
                 st.success("판정: 분할 추가매수 허용 — 투자일기에 계획을 먼저 기록하세요.")
+
+# ── 매수 이유 점검 (M11) ────────────────────────────────────
+STATUS_HELP = {"유지": "산 이유 그대로 — 계속 보유", "주의": "흔들리는 신호 — 다음 실적에서 재확인",
+               "깨짐": "깨지는 조건 충족 — 평단과 무관하게 정리 검토"}
+
+
+def review_form(row) -> None:
+    t = row.ticker
+    thesis = valued.loc[valued["ticker"] == t, "thesis"].iloc[0] or "(보유 사유 미기록 — 보유 종목 탭에서 입력)"
+    st.markdown(f"**산 이유:** {thesis}")
+    if row.last_review:
+        st.caption(f"최근 점검 {row.last_review} ({int(row.days_since)}일 전) · {row.last_status}")
+    with st.form(f"review_{t}"):
+        cond = st.text_input("이 이야기가 깨지는 조건", value=row.break_condition,
+                             placeholder="예: Azure 성장률 20% 미만 2분기 연속")
+        status = st.radio("판정", STATUSES, horizontal=True, format_func=lambda s: f"{s} — {STATUS_HELP[s]}")
+        note = st.text_area("무엇을 보고 판단했나 (실적·가이던스·뉴스)", height=68)
+        if not st.form_submit_button("점검 기록"):
+            return
+    if not cond.strip():
+        st.error("깨지는 조건을 먼저 적으세요. 기준이 없으면 점검할 수 없습니다.")
+        return
+    try:
+        save_review(t, status, note, cond, date.today().isoformat())
+    except ValueError as e:
+        st.error(str(e))
+        return
+    st.session_state["review_flash"] = f"{t} 점검을 기록했습니다: {status}"
+    st.rerun()
+
+
+with tab_review:
+    every = ips.rules.get("thesis_review_days", 90)
+    st.markdown(f"위성 종목마다 **{every}일에 한 번**(실적 발표 뒤가 좋음) '깨지는 조건'을 기준으로 산 이유가 "
+                "아직 유효한지 확인합니다. 떨어지고 나서가 아니라 **떨어지기 전에** 판단 기준을 점검하는 것이 목적입니다.")
+    if flash := st.session_state.pop("review_flash", None):
+        st.success(flash)
+    if reviews.empty:
+        st.info("위성 종목이 없습니다.")
+    for row in reviews.itertuples():
+        mark = "🔴 깨짐" if row.last_status == "깨짐" else ("🟡 점검 필요" if row.due else "🟢 " + str(row.last_status))
+        with st.expander(f"{row.ticker} — {mark}", expanded=bool(row.due)):
+            review_form(row)
+            if row.last_status == "깨짐":
+                st.error("정리 검토: 투자일기에서 매도를 기록하면 보유 종목에 반영됩니다.")
+
+    history = load_reviews()
+    if not history.empty:
+        st.subheader("점검 기록")
+        st.dataframe(history[["review_date", "ticker", "status", "break_condition", "note"]]
+                     .rename(columns={"review_date": "점검일", "ticker": "종목", "status": "판정",
+                                      "break_condition": "깨지는 조건", "note": "메모"}),
+                     hide_index=True, use_container_width=True)
+
 
 # ── 투자일기 (M4) ─────────────────────────────────────────
 def record_trade(rec: dict, violations: list, override: str, sync: bool, use_cash: bool, sector: str) -> None:
