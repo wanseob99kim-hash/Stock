@@ -35,7 +35,8 @@ def _conn(db: Path | str = DB) -> sqlite3.Connection:
         violations TEXT, override_reason TEXT, compliant INTEGER,
         created_at TEXT)""")
     cols = {r[1] for r in c.execute("PRAGMA table_info(trades)")}
-    for col, typ in (("realized_pnl", "REAL"), ("currency", "TEXT")):   # 이전 버전 DB 호환
+    for col, typ in (("realized_pnl", "REAL"), ("currency", "TEXT"), ("fx", "REAL"),
+                     ("realized_krw", "REAL"), ("realized_approx", "INTEGER")):   # 이전 버전 DB 호환
         if col not in cols:
             c.execute(f"ALTER TABLE trades ADD COLUMN {col} {typ}")
     return c
@@ -75,15 +76,16 @@ def save_trade(record: dict, violations: list[str], override_reason: str = "", d
         cur = c.execute(
             """INSERT INTO trades (trade_date, account, ticker, side, quantity, price, thesis, fundamentals,
                valuation, plan, break_condition, violations, override_reason, compliant, created_at,
-               realized_pnl, currency)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               realized_pnl, currency, fx, realized_krw, realized_approx)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (str(record.get("trade_date", date.today())), record.get("account", "B"),
              record["ticker"].upper(), record["side"], float(record.get("quantity", 0)),
              float(record.get("price", 0)), record.get("thesis", ""), record.get("fundamentals", ""),
              record.get("valuation", ""), record.get("plan", ""), record.get("break_condition", ""),
              " | ".join(violations), override_reason, 0 if violations else 1,
              datetime.now().isoformat(timespec="seconds"),
-             record.get("realized_pnl"), record.get("currency")))
+             record.get("realized_pnl"), record.get("currency"), record.get("fx"),
+             record.get("realized_krw"), record.get("realized_approx")))
         return int(cur.lastrowid)
 
 

@@ -11,7 +11,8 @@ from .ips import IPS
 ROOT = Path(__file__).resolve().parent.parent
 HOLDINGS = ROOT / "data" / "holdings.csv"
 EXAMPLE = ROOT / "data" / "holdings.example.csv"  # 처음 실행 시 복사해 쓰는 예시
-COLUMNS = ["account", "ticker", "market", "quantity", "avg_cost", "sector", "thesis"]
+COLUMNS = ["account", "ticker", "market", "quantity", "avg_cost", "avg_fx", "sector", "thesis"]
+# avg_fx: 미국 종목 평균 매입 환율(원/달러). 비우면 원화 손익은 현재 환율로 추정
 
 
 def load_holdings(path: Path | str = HOLDINGS) -> pd.DataFrame:
@@ -26,6 +27,7 @@ def load_holdings(path: Path | str = HOLDINGS) -> pd.DataFrame:
     df["account"] = df["account"].astype(str).str.upper()
     df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0.0)
     df["avg_cost"] = pd.to_numeric(df["avg_cost"], errors="coerce").fillna(0.0)
+    df["avg_fx"] = pd.to_numeric(df["avg_fx"], errors="coerce")
     df = df[df["ticker"] != ""]
     return df[COLUMNS].reset_index(drop=True)
 
@@ -77,21 +79,27 @@ def _adjust_cash(df: pd.DataFrame, account: str, delta: float) -> pd.DataFrame:
         raise ValueError(f"{account}계좌 현금 부족: 보유 ${have:,.2f}, 필요 ${-delta:,.2f}")
     if m.any():
         return df.assign(quantity=df["quantity"].where(~m, have + delta))
-    row = pd.DataFrame([[account, "CASH", "US", delta, 1.0, "", ""]], columns=COLUMNS)
+    row = pd.DataFrame([[account, "CASH", "US", delta, 1.0, float("nan"), "", ""]], columns=COLUMNS)
     return pd.concat([df, row], ignore_index=True)
 
 
 def apply_trade(holdings: pd.DataFrame, account: str, ticker: str, side: str, quantity: float, price: float,
-                sector: str = "", thesis: str = "", adjust_cash: bool = False) -> tuple[pd.DataFrame, float | None]:
+                sector: str = "", thesis: str = "", adjust_cash: bool = False,
+                fx: float | None = None) -> tuple[pd.DataFrame, float | None]:
     """거래 1건을 반영한 새 보유 종목 표와 실현 손익(현지통화, 매수면 None). 원본은 바꾸지 않는다.
 
     매수: 수량 합산, 평단은 가중평균. 매도: 평단 유지, 수량 0이면 행 삭제.
     adjust_cash=True 이면 미국 종목 거래 금액을 같은 계좌 CASH 에서 빼거나 더한다.
+    fx(거래 환율)를 주면 미국 종목 매수 시 평균 매입 환율(avg_fx)을 달러 원가 가중으로 갱신한다.
     """
     t = str(ticker).upper().strip()
     if quantity <= 0 or price <= 0:
         raise ValueError("수량과 단가는 0보다 커야 합니다.")
     df = holdings.copy().reset_index(drop=True)
+    if "avg_fx" not in df:
+        df["avg_fx"] = float("nan")
+    df["avg_fx"] = pd.to_numeric(df["avg_fx"], errors="coerce")
+    is_us = _market_of(t) == "US"
     m = (df["account"] == account) & (df["ticker"] == t)
     q0 = float(df.loc[m, "quantity"].sum())
     realized = None
@@ -99,14 +107,17 @@ def apply_trade(holdings: pd.DataFrame, account: str, ticker: str, side: str, qu
     if side == "매수":
         if m.any():
             i = df.index[m][0]
-            a0 = float(df.at[i, "avg_cost"])
+            a0, f0 = float(df.at[i, "avg_cost"]), float(df.at[i, "avg_fx"])
+            if is_us and fx and f0 > 0:
+                df.at[i, "avg_fx"] = (q0 * a0 * f0 + quantity * price * fx) / (q0 * a0 + quantity * price)
             df.at[i, "quantity"] = q0 + quantity
             df.at[i, "avg_cost"] = (q0 * a0 + quantity * price) / (q0 + quantity)
             for col, val in (("sector", sector), ("thesis", thesis)):
                 if val and not str(df.at[i, col]).strip():
                     df.at[i, col] = val
         else:
-            row = pd.DataFrame([[account, t, _market_of(t), quantity, price, sector, thesis]], columns=COLUMNS)
+            new_fx = fx if (is_us and fx) else float("nan")
+            row = pd.DataFrame([[account, t, _market_of(t), quantity, price, new_fx, sector, thesis]], columns=COLUMNS)
             df = pd.concat([df, row], ignore_index=True)
     else:
         if not m.any():
@@ -118,7 +129,7 @@ def apply_trade(holdings: pd.DataFrame, account: str, ticker: str, side: str, qu
         left = q0 - quantity
         df = df.drop(index=i) if left <= 1e-9 else df.assign(quantity=df["quantity"].where(df.index != i, left))
 
-    if adjust_cash and _market_of(t) == "US":
+    if adjust_cash and is_us:
         amount = quantity * price
         df = _adjust_cash(df, account, -amount if side == "매수" else amount)
-    return df.reset_index(drop=True), realized
+    return df[[c for c in COLUMNS if c in df]].reset_index(drop=True), realized

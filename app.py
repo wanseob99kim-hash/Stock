@@ -20,6 +20,7 @@ from core.journal import CHECKLIST, check_trade, compliance_rate, load_trades, r
 from core.portfolio import apply_trade, bucket_weights, load_holdings, save_holdings, value_portfolio
 from core.prices import fetch_history, get_quotes
 from core.review import STATUSES, load_reviews, review_status, save_review
+from core.tax import harvest_plan, krw_breakdown, realized_krw, tax_summary
 
 st.set_page_config(page_title="코어-위성 포트폴리오", layout="wide")
 
@@ -46,6 +47,10 @@ def fmt_usd(x: float) -> str:
     return f"${x:,.0f}"
 
 
+def fmt_krw(x: float) -> str:
+    return f"{x / 10_000:+,.0f}만 원" if abs(x) >= 10_000 else f"{x:+,.0f}원"
+
+
 ips = load_ips()
 holdings = load_holdings()
 prices, hist, usdkrw, source = _quotes(holdings.to_json())
@@ -69,8 +74,9 @@ if stale:
     st.warning("실시간 시세를 못 받은 종목: " + ", ".join(f"{t}({source[t]})" for t in stale)
                + " — 캐시 또는 평단으로 계산했습니다.")
 
-tab_dash, tab_perf, tab_contrib, tab_health, tab_review, tab_journal, tab_hold, tab_ips = st.tabs(
-    ["대시보드", "성과 비교", "이번 달 적립", "계좌 검진", "매수 이유 점검", "투자일기", "보유 종목", "투자정책서"])
+tab_dash, tab_perf, tab_tax, tab_contrib, tab_health, tab_review, tab_journal, tab_hold, tab_ips = st.tabs(
+    ["대시보드", "성과 비교", "원화·세금", "이번 달 적립", "계좌 검진", "매수 이유 점검", "투자일기", "보유 종목",
+     "투자정책서"])
 
 # ── 대시보드 ────────────────────────────────────────────────
 with tab_dash:
@@ -177,6 +183,58 @@ with tab_perf:
                    "지금 살아남은 종목만 보므로 실제보다 좋게 나오기 쉽습니다(생존 편향).")
         perf_metrics(hypo, bname)
         st.plotly_chart(perf_chart(hypo, bname), use_container_width=True)
+
+# ── 원화·세금 (M12) ──────────────────────────────────────────
+PLAN_RENAME = {"ticker": "종목", "shares": "매도 주수", "amount_usd": "매도 금액", "realized_krw": "확정 손익(원)"}
+
+
+def show_plan(df: pd.DataFrame) -> None:
+    st.dataframe(df.assign(amount_usd=df["amount_usd"].map(fmt_usd), realized_krw=df["realized_krw"].map(fmt_krw))
+                 .rename(columns=PLAN_RENAME), hide_index=True, use_container_width=True)
+
+
+with tab_tax:
+    bd = krw_breakdown(valued, usdkrw)
+    st.subheader("원화 기준 손익")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("평가손익 (원화)", fmt_krw(bd["pnl_krw"].sum()))
+    k2.metric("주가 효과", fmt_krw(bd["stock_effect"].sum()), help="환율이 매입 때 그대로였다면의 손익")
+    k3.metric("환율 효과", fmt_krw(bd["fx_effect"].sum()), help="매입 이후 원/달러 환율 변화로 생긴 손익")
+    unknown = bd.loc[(bd["market"] == "US") & ~bd["fx_known"], "ticker"].tolist()
+    if unknown:
+        st.warning("평균 매입 환율 미입력: " + ", ".join(unknown) + " — 현재 환율로 추정해 환율 효과가 0으로 잡힙니다. "
+                   "'보유 종목' 탭의 '평균 매입 환율' 칸을 채우세요(증권사 잔고의 매입환율).")
+    st.dataframe(pd.DataFrame({
+        "종목": bd["ticker"], "평가액": bd["value_krw"].map(lambda x: f"{x / 10_000:,.0f}만 원"),
+        "손익": bd["pnl_krw"].map(fmt_krw), "주가 효과": bd["stock_effect"].map(fmt_krw),
+        "환율 효과": bd["fx_effect"].map(fmt_krw),
+        "환율": bd["fx_known"].map({True: "확정", False: "추정"})}), hide_index=True, use_container_width=True)
+
+    year = str(date.today().year)
+    tcfg = ips.tax
+    ts = tax_summary(trades, year, tcfg)
+    st.subheader(f"{year}년 해외주식 양도소득세 (추정)")
+    t1, t2, t3 = st.columns(3)
+    t1.metric("실현 양도차익", fmt_krw(ts["gain_krw"]))
+    t2.metric("남은 기본공제", f"{ts['remaining_deduction_krw'] / 10_000:,.0f}만 원")
+    t3.metric("예상 세액", f"{ts['tax_krw'] / 10_000:,.0f}만 원", help=f"(양도차익 − 공제) × {ts['rate']:.0%}")
+    st.caption(f"대상: {', '.join(tcfg.get('taxable_accounts', ['B']))}계좌의 해외 상장 주식·ETF, 같은 해 이익·손실 통산. "
+               "국내 상장 주식(소액주주)은 제외. 투자일기에 기록한 매도만 집계합니다. 신고·납부는 다음 해 5월.")
+    if ts["approx_count"]:
+        st.caption(f"매입 환율을 몰라 추정한 매도 {ts['approx_count']}건이 포함되어 있습니다.")
+
+    plan = harvest_plan(bd, ts["remaining_deduction_krw"], ts["taxable_krw"], tcfg.get("taxable_accounts", ["B"]))
+    if not plan["gains"].empty:
+        st.markdown(f"**공제 한도 채우기** — 올해 남은 공제 {ts['remaining_deduction_krw'] / 10_000:,.0f}만 원까지 "
+                    "이익을 세금 없이 확정할 수 있습니다. 팔고 다시 사면 취득가가 올라가 나중 세금이 줄어듭니다. "
+                    "각 줄은 '이 종목 하나로 채운다면'의 대안입니다.")
+        show_plan(plan["gains"])
+    if not plan["losses"].empty:
+        st.markdown(f"**손실로 상계하기** — 공제를 넘은 이익 {ts['taxable_krw'] / 10_000:,.0f}만 원을 "
+                    "손실 종목 매도로 줄일 수 있습니다. 매수 이유가 깨진 종목부터 검토하세요.")
+        show_plan(plan["losses"])
+    st.info("12월에는 결제일 기준으로 연도가 정해집니다. 미국 주식은 거래 다음 날 결제되므로 마지막 거래일 "
+            "며칠 전까지 매도하세요. 이 화면은 참고용 추정이며, 실제 신고는 증권사 양도세 계산 결과를 따르세요.")
 
 # ── 이번 달 적립 (M2) ───────────────────────────────────────
 with tab_contrib:
@@ -323,10 +381,15 @@ def record_trade(rec: dict, violations: list, override: str, sync: bool, use_cas
     """일기 저장 + (선택) 보유 종목 반영. 보유 반영이 불가능하면 아무것도 저장하지 않는다."""
     new_holdings = None
     if sync:
+        pos = holdings[(holdings["account"] == rec["account"]) & (holdings["ticker"] == rec["ticker"])]
+        if rec["side"] == "매도" and len(pos):
+            rec["realized_krw"], rec["realized_approx"] = realized_krw(
+                pos["market"].iloc[0], rec["quantity"], rec["price"], float(pos["avg_cost"].iloc[0]),
+                float(pos["avg_fx"].iloc[0]), rec["fx"] or usdkrw)
         try:
             new_holdings, rec["realized_pnl"] = apply_trade(
                 holdings, rec["account"], rec["ticker"], rec["side"], rec["quantity"], rec["price"],
-                sector=sector, thesis=rec.get("thesis", ""), adjust_cash=use_cash)
+                sector=sector, thesis=rec.get("thesis", ""), adjust_cash=use_cash, fx=rec["fx"])
         except ValueError as e:
             st.error(f"보유 종목에 반영할 수 없어 저장하지 않았습니다: {e}")
             return
@@ -339,7 +402,8 @@ def record_trade(rec: dict, violations: list, override: str, sync: bool, use_cas
     _quotes.clear()
     pnl = rec.get("realized_pnl")
     if pnl is not None:
-        msg += f" 실현 손익 {pnl:+,.0f} {rec['currency']}."
+        msg += f" 실현 손익 {pnl:+,.0f} {rec['currency']}"
+        msg += f" (원화 {fmt_krw(rec['realized_krw'])})." if rec.get("realized_krw") is not None else "."
     st.session_state["journal_flash"] = msg + " 보유 종목에 반영했습니다."
     st.rerun()
 
@@ -356,10 +420,12 @@ with tab_journal:
         ticker = c.text_input("종목 (티커/코드)").upper().strip()
         qty = d.number_input("수량", min_value=0.0, step=1.0)
         price = e.number_input("단가(현지통화)", min_value=0.0, step=0.01)
-        f1, f2, f3 = st.columns(3)
+        f1, f2, f3, f4 = st.columns(4)
         account = f1.selectbox("계좌", ["B", "A"], help="A=은퇴계좌(지수만), B=일반계좌")
         name = f2.text_input("상품명 (한국 ETF는 이름으로 레버리지/인버스/(H) 검사)")
         sector = f3.text_input("섹터 (위성 신규 매수 시)", help="예: Technology, Healthcare")
+        trade_fx = f4.number_input("거래 환율 (원/달러, 미국 종목)", min_value=0.0, value=round(usdkrw, 1), step=0.1,
+                                   help="증권사 체결 내역의 적용 환율. 원화 손익·양도세 계산에 씁니다.")
         fields = {k: st.text_area(label, height=68) for k, label in CHECKLIST.items()}
         brk = st.text_input("이 이야기가 깨지는 조건 (다모다란: 내러티브 무효 조건)")
         override = st.text_input("규칙 위반이 있을 때만: 그래도 하는 이유")
@@ -388,7 +454,7 @@ with tab_journal:
             else:
                 rec = {"trade_date": tdate, "account": account, "ticker": ticker, "side": side,
                        "quantity": qty, "price": price, "break_condition": brk,
-                       "currency": "KRW" if is_kr else "USD", **fields}
+                       "currency": "KRW" if is_kr else "USD", "fx": None if is_kr else trade_fx, **fields}
                 record_trade(rec, res["violations"], override, sync, use_cash, sector)
 
     st.subheader("기록")
@@ -417,6 +483,8 @@ with tab_hold:
         "account": st.column_config.SelectboxColumn("계좌", options=["A", "B"]),
         "market": st.column_config.SelectboxColumn("시장", options=["US", "KR"]),
         "ticker": "종목", "quantity": "수량", "avg_cost": "평단(현지통화)",
+        "avg_fx": st.column_config.NumberColumn("평균 매입 환율(미국)", format="%.1f",
+                                                help="증권사 잔고의 매입환율. 원화 손익·양도세 계산용"),
         "sector": "섹터(위성만)", "thesis": st.column_config.TextColumn("보유 사유(한 문장)", width="large")})
     if st.button("저장하고 다시 계산"):
         save_holdings(edited)

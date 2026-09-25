@@ -51,6 +51,12 @@ rules:
   thesis_review_days: 90         # 위성 매수 이유 점검 주기(일) — 분기 실적 주기
   health_pass_score: 70          # 포트폴리오 건강 점수 합격선
 
+# 해외주식 양도소득세 (참고용 추정 — 실제 신고는 증권사 양도세 계산 결과 기준)
+tax:
+  deduction_krw: 2500000         # 연간 기본공제 250만 원
+  rate: 0.22                     # 20% + 지방소득세 2%
+  taxable_accounts: [B]          # 양도세 계산 대상 계좌 (A=은퇴계좌는 과세 방식이 달라 제외. 일반계좌면 추가)
+
 # 금지 상품 (매수 기록 시 차단)
 banned:
   tickers: [TQQQ, SQQQ, QLD, QID, SSO, SDS, UPRO, SPXU, SPXL, SPXS, SOXL, SOXS,

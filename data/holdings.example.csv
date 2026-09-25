@@ -1,8 +1,8 @@
-account,ticker,market,quantity,avg_cost,sector,thesis
-A,VOO,US,10,450,,
-A,QQQM,US,10,180,,
-A,SCHD,US,50,25,,
-A,SGOV,US,10,100,,
-B,NVDA,US,5,110,Technology,예시: AI 칩 수요가 계속 늘어나는 한 보유
-B,JNJ,US,5,150,Healthcare,예시: 배당과 헬스케어 방어력
-B,CASH,US,1000,1,,
+account,ticker,market,quantity,avg_cost,avg_fx,sector,thesis
+A,VOO,US,10,450,1300,,
+A,QQQM,US,10,180,1300,,
+A,SCHD,US,50,25,1300,,
+A,SGOV,US,10,100,1350,,
+B,NVDA,US,5,110,1320,Technology,예시: AI 칩 수요가 계속 늘어나는 한 보유
+B,JNJ,US,5,150,1380,Healthcare,예시: 배당과 헬스케어 방어력
+B,CASH,US,1000,1,1350,,

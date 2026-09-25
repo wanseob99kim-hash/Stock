@@ -28,6 +28,7 @@ class IPS:
     banned_tickers: set[str]
     banned_keywords: list[str]
     benchmark: str = "VOO"
+    tax: dict = field(default_factory=dict)
 
     def bucket_of(self, ticker: str) -> str:
         """종목이 속한 버킷 키. 어디에도 없으면 satellite."""
@@ -71,4 +72,5 @@ def load_ips(path: Path | str = DEFAULT_IPS) -> IPS:
         banned_tickers={str(t).upper() for t in banned.get("tickers", [])},
         banned_keywords=list(banned.get("name_keywords", [])),
         benchmark=str(raw.get("benchmark", "VOO")).upper(),
+        tax=raw.get("tax", {}) or {},
     )
