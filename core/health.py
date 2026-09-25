@@ -5,7 +5,11 @@ from itertools import combinations
 
 import pandas as pd
 
+from .balancer import overweight_actions
 from .ips import IPS
+
+OVER_BY_BUY = 10   # 많이 사서 한도 초과: 규칙 위반
+OVER_BY_GAIN = 5   # 올라서 한도 초과: 잘된 결과라 감점 완화, 비중 조정만 권고
 
 
 def _trend_broken(series: pd.Series) -> bool:
@@ -37,9 +41,11 @@ def health_check(valued: pd.DataFrame, hist_usd: pd.DataFrame, ips: IPS) -> dict
 
     # 2. 단일 종목 비중
     cap = r.get("max_single_stock", 0.07)
-    heavy = sat[sat["weight"] > cap]
-    items.append(("단일 종목 비중", -10 * len(heavy),
-                  ", ".join(f"{t} {w:.1%}" for t, w in zip(heavy["ticker"], heavy["weight"])) or f"모두 {cap:.0%} 이하"))
+    heavy = overweight_actions(valued, cap)
+    by_gain = heavy["cause"] == "상승"
+    items.append(("단일 종목 비중", -OVER_BY_BUY * int((~by_gain).sum()) - OVER_BY_GAIN * int(by_gain.sum()),
+                  ", ".join(f"{r.ticker} {r.weight:.1%}({r.cause})" for r in heavy.itertuples())
+                  or f"모두 {cap:.0%} 이하"))
 
     # 3. 섹터 집중
     ded, detail = 0, []

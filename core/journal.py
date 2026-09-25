@@ -34,6 +34,10 @@ def _conn(db: Path | str = DB) -> sqlite3.Connection:
         thesis TEXT, fundamentals TEXT, valuation TEXT, plan TEXT, break_condition TEXT,
         violations TEXT, override_reason TEXT, compliant INTEGER,
         created_at TEXT)""")
+    cols = {r[1] for r in c.execute("PRAGMA table_info(trades)")}
+    for col, typ in (("realized_pnl", "REAL"), ("currency", "TEXT")):   # 이전 버전 DB 호환
+        if col not in cols:
+            c.execute(f"ALTER TABLE trades ADD COLUMN {col} {typ}")
     return c
 
 
@@ -70,14 +74,16 @@ def save_trade(record: dict, violations: list[str], override_reason: str = "", d
     with _conn(db) as c:
         cur = c.execute(
             """INSERT INTO trades (trade_date, account, ticker, side, quantity, price, thesis, fundamentals,
-               valuation, plan, break_condition, violations, override_reason, compliant, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               valuation, plan, break_condition, violations, override_reason, compliant, created_at,
+               realized_pnl, currency)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (str(record.get("trade_date", date.today())), record.get("account", "B"),
              record["ticker"].upper(), record["side"], float(record.get("quantity", 0)),
              float(record.get("price", 0)), record.get("thesis", ""), record.get("fundamentals", ""),
              record.get("valuation", ""), record.get("plan", ""), record.get("break_condition", ""),
              " | ".join(violations), override_reason, 0 if violations else 1,
-             datetime.now().isoformat(timespec="seconds")))
+             datetime.now().isoformat(timespec="seconds"),
+             record.get("realized_pnl"), record.get("currency")))
         return int(cur.lastrowid)
 
 
@@ -94,3 +100,11 @@ def compliance_rate(trades: pd.DataFrame, month: str | None = None) -> float | N
     if df.empty:
         return None
     return float(df["compliant"].mean())
+
+
+def realized_by_currency(trades: pd.DataFrame, year: str) -> dict:
+    """해당 연도 매도 실현 손익 합계 {통화: 금액}. 세금 계산용 기초 자료."""
+    if trades.empty or "realized_pnl" not in trades:
+        return {}
+    df = trades[trades["trade_date"].astype(str).str.startswith(year) & trades["realized_pnl"].notna()]
+    return {k: float(v) for k, v in df.groupby("currency")["realized_pnl"].sum().items()}

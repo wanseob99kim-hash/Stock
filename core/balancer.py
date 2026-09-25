@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from .ips import IPS
@@ -58,3 +60,31 @@ def satellite_split(valued: pd.DataFrame, buy_usd: float, cap: float, contributi
     else:
         sat["buy_usd"] = (sat["headroom_usd"] / room * min(buy_usd, room)).round(2)
     return sat[["ticker", "weight", "headroom_usd", "buy_usd"]]
+
+
+def overweight_actions(valued: pd.DataFrame, cap: float) -> pd.DataFrame:
+    """한도(cap) 넘은 위성 종목별 조치 금액.
+
+    cause: 원가 기준 비중도 한도 초과면 '매수'(많이 사서), 아니면 '상승'(올라서)
+    trim_usd/trim_shares: 한도까지 줄이는 매도 금액·주수 (매도 대금은 계좌에 남아 총자산 불변)
+    dilute_usd: 팔지 않고 다른 자산 적립만으로 한도에 맞추려면 필요한 추가 입금액
+    gain_on_trim_usd: 한도까지 매도 시 예상 실현 이익 (세금 참고)
+    """
+    cols = ["ticker", "weight", "cause", "trim_usd", "trim_shares", "dilute_usd", "gain_on_trim_usd"]
+    total, total_cost = valued["value_usd"].sum(), valued["cost_usd"].sum()
+    sat = valued[(valued["bucket"] == "satellite") & (valued["ticker"] != "CASH") & (valued["weight"] > cap)]
+    if sat.empty or not total:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for r in sat.itertuples():
+        trim = r.value_usd - cap * total
+        shares = math.ceil(trim / r.price_usd) if r.price_usd else 0
+        cost_per_share = r.cost_usd / r.quantity if r.quantity else 0.0
+        rows.append({
+            "ticker": r.ticker, "weight": r.weight,
+            "cause": "매수" if total_cost and r.cost_usd / total_cost > cap else "상승",
+            "trim_usd": trim, "trim_shares": shares,
+            "dilute_usd": r.value_usd / cap - total,
+            "gain_on_trim_usd": shares * (r.price_usd - cost_per_share),
+        })
+    return pd.DataFrame(rows, columns=cols)

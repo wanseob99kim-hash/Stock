@@ -12,12 +12,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from core.balancer import contribution_plan, rebalance_orders, satellite_split
+from core.balancer import contribution_plan, overweight_actions, rebalance_orders, satellite_split
 from core.health import health_check
 from core.history import chain_returns, hypothetical_growth, load_snapshots, save_snapshot
 from core.ips import load_ips
-from core.journal import CHECKLIST, check_trade, compliance_rate, load_trades, save_trade
-from core.portfolio import bucket_weights, load_holdings, save_holdings, value_portfolio
+from core.journal import CHECKLIST, check_trade, compliance_rate, load_trades, realized_by_currency, save_trade
+from core.portfolio import apply_trade, bucket_weights, load_holdings, save_holdings, value_portfolio
 from core.prices import fetch_history, get_quotes
 
 st.set_page_config(page_title="코어-위성 포트폴리오", layout="wide")
@@ -211,6 +211,24 @@ with tab_health:
         "합격" if health["passed"] else f"{ips.rules['health_pass_score']}점 미만 — 감점 항목을 정리하세요")
     col2.dataframe(health["items"], hide_index=True, use_container_width=True)
 
+    cap = ips.rules["max_single_stock"]
+    over = overweight_actions(valued, cap)
+    if not over.empty:
+        st.subheader(f"비중 초과 종목 — 한도 {cap:.0%}로 맞추는 방법")
+        st.markdown("**상승**: 매수 당시엔 한도 안이었는데 올라서 넘음(감점 5) · "
+                    "**매수**: 원가 기준으로도 한도 초과(감점 10). 아래 셋 중 하나를 고르세요.")
+        st.dataframe(pd.DataFrame({
+            "종목": over["ticker"], "현재 비중": over["weight"].map("{:.1%}".format), "원인": over["cause"],
+            "① 한도까지 매도": [f"{fmt_usd(u)} (약 {n}주)" for u, n in zip(over["trim_usd"], over["trim_shares"])],
+            "② 절반만 매도": over["trim_usd"].map(lambda u: fmt_usd(u / 2)),
+            "③ 안 팔고 다른 자산 적립": over["dilute_usd"].map(fmt_usd),
+            "①의 예상 실현 이익": over["gain_on_trim_usd"].map(fmt_usd)}),
+            hide_index=True, use_container_width=True)
+        st.caption("① 매도 대금은 계좌에 남으니 '이번 달 적립'에서 모자란 자산군으로 옮기세요. "
+                   "② 이익 일부만 확정하고 나머지는 추세를 따라갑니다. "
+                   "③ 금액이 크면 현실적이지 않습니다 — 적립 몇 달 치인지 보고 판단하세요. "
+                   "해외주식 양도차익은 연 250만 원 공제 후 22% 과세이니 연말 매도 시 ① 이익을 참고하세요.")
+
     st.subheader("트레일링 경보 → 물타기 4단계 게이트")
     if not health["trailing_alerts"]:
         st.success(f"고점 대비 -{ips.rules['trailing_stop']:.0%} 이하로 떨어진 위성 종목이 없습니다.")
@@ -234,8 +252,36 @@ with tab_health:
             else:
                 st.success("판정: 분할 추가매수 허용 — 투자일기에 계획을 먼저 기록하세요.")
 
+# ── 투자일기 (M4) ─────────────────────────────────────────
+def record_trade(rec: dict, violations: list, override: str, sync: bool, use_cash: bool, sector: str) -> None:
+    """일기 저장 + (선택) 보유 종목 반영. 보유 반영이 불가능하면 아무것도 저장하지 않는다."""
+    new_holdings = None
+    if sync:
+        try:
+            new_holdings, rec["realized_pnl"] = apply_trade(
+                holdings, rec["account"], rec["ticker"], rec["side"], rec["quantity"], rec["price"],
+                sector=sector, thesis=rec.get("thesis", ""), adjust_cash=use_cash)
+        except ValueError as e:
+            st.error(f"보유 종목에 반영할 수 없어 저장하지 않았습니다: {e}")
+            return
+    save_trade(rec, violations, override)
+    msg = "저장했습니다." + (" (규칙 위반으로 기록됨)" if violations else "")
+    if new_holdings is None:
+        st.success(msg + " 보유 종목은 바꾸지 않았습니다.")
+        return
+    save_holdings(new_holdings)
+    _quotes.clear()
+    pnl = rec.get("realized_pnl")
+    if pnl is not None:
+        msg += f" 실현 손익 {pnl:+,.0f} {rec['currency']}."
+    st.session_state["journal_flash"] = msg + " 보유 종목에 반영했습니다."
+    st.rerun()
+
+
 # ── 투자일기 (M4) ──────────────────────────────────────────
 with tab_journal:
+    if flash := st.session_state.pop("journal_flash", None):
+        st.success(flash)
     st.markdown("매수는 **네 칸을 모두 채워야** 저장됩니다. 금지 상품은 차단되고, 다른 규칙 위반은 사유를 남겨야 저장됩니다.")
     with st.form("trade"):
         a, b, c, d, e = st.columns(5)
@@ -244,12 +290,18 @@ with tab_journal:
         ticker = c.text_input("종목 (티커/코드)").upper().strip()
         qty = d.number_input("수량", min_value=0.0, step=1.0)
         price = e.number_input("단가(현지통화)", min_value=0.0, step=0.01)
-        f1, f2 = st.columns(2)
+        f1, f2, f3 = st.columns(3)
         account = f1.selectbox("계좌", ["B", "A"], help="A=은퇴계좌(지수만), B=일반계좌")
         name = f2.text_input("상품명 (한국 ETF는 이름으로 레버리지/인버스/(H) 검사)")
+        sector = f3.text_input("섹터 (위성 신규 매수 시)", help="예: Technology, Healthcare")
         fields = {k: st.text_area(label, height=68) for k, label in CHECKLIST.items()}
         brk = st.text_input("이 이야기가 깨지는 조건 (다모다란: 내러티브 무효 조건)")
         override = st.text_input("규칙 위반이 있을 때만: 그래도 하는 이유")
+        s1, s2 = st.columns(2)
+        sync = s1.checkbox("보유 종목에 자동 반영 (수량·평단)", value=True,
+                           help="끄면 기록만 남깁니다. 과거 거래를 옮겨 적을 때 끄세요.")
+        use_cash = s2.checkbox("달러 거래 금액을 CASH에서 빼기/더하기", value=False,
+                               help="보유 종목의 CASH 행을 거래 금액만큼 조정합니다.")
         submitted = st.form_submit_button("검사 후 저장")
 
     if submitted:
@@ -269,20 +321,25 @@ with tab_journal:
                 st.warning("규칙 위반: " + " / ".join(res["violations"]) + " — 진행하려면 이유를 적으세요.")
             else:
                 rec = {"trade_date": tdate, "account": account, "ticker": ticker, "side": side,
-                       "quantity": qty, "price": price, "break_condition": brk, **fields}
-                save_trade(rec, res["violations"], override)
-                st.success("저장했습니다." + (" (규칙 위반으로 기록됨)" if res["violations"] else ""))
-                st.caption("보유 종목 표의 수량·평단은 '보유 종목' 탭에서 갱신하세요.")
-                trades = load_trades()
+                       "quantity": qty, "price": price, "break_condition": brk,
+                       "currency": "KRW" if is_kr else "USD", **fields}
+                record_trade(rec, res["violations"], override, sync, use_cash, sector)
 
     st.subheader("기록")
+    year = str(date.today().year)
+    realized = realized_by_currency(trades, year)
+    if realized:
+        cols = st.columns(len(realized) + 1)
+        for col, (cur, amt) in zip(cols, sorted(realized.items(), reverse=True)):
+            col.metric(f"{year}년 실현 손익 ({cur})", f"{amt:+,.0f}")
+        cols[-1].caption("해외주식 양도차익은 연 250만 원까지 공제됩니다. 원화 환산은 거래일 환율 기준으로 따로 확인하세요.")
     if trades.empty:
         st.info("아직 기록이 없습니다.")
     else:
-        st.dataframe(trades[["trade_date", "account", "ticker", "side", "quantity", "price", "thesis",
-                             "break_condition", "violations", "compliant"]]
+        st.dataframe(trades[["trade_date", "account", "ticker", "side", "quantity", "price", "realized_pnl",
+                             "thesis", "break_condition", "violations", "compliant"]]
                      .rename(columns={"trade_date": "거래일", "account": "계좌", "ticker": "종목", "side": "구분",
-                                      "quantity": "수량", "price": "단가", "thesis": "왜 샀나",
+                                      "quantity": "수량", "price": "단가", "realized_pnl": "실현손익", "thesis": "왜 샀나",
                                       "break_condition": "깨지는 조건", "violations": "위반", "compliant": "준수"}),
                      hide_index=True, use_container_width=True)
 

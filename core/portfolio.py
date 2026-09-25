@@ -63,3 +63,62 @@ def bucket_weights(valued: pd.DataFrame, ips: IPS) -> pd.DataFrame:
             "out_of_band": not (b.band[0] <= w <= b.band[1]),
         })
     return pd.DataFrame(rows)
+
+
+def _market_of(ticker: str) -> str:
+    return "KR" if ticker.isdigit() else "US"
+
+
+def _adjust_cash(df: pd.DataFrame, account: str, delta: float) -> pd.DataFrame:
+    """같은 계좌 CASH(달러) 수량에 delta 를 더한 새 표. 부족하면 ValueError."""
+    m = (df["account"] == account) & (df["ticker"] == "CASH")
+    have = float(df.loc[m, "quantity"].sum())
+    if have + delta < -1e-9:
+        raise ValueError(f"{account}계좌 현금 부족: 보유 ${have:,.2f}, 필요 ${-delta:,.2f}")
+    if m.any():
+        return df.assign(quantity=df["quantity"].where(~m, have + delta))
+    row = pd.DataFrame([[account, "CASH", "US", delta, 1.0, "", ""]], columns=COLUMNS)
+    return pd.concat([df, row], ignore_index=True)
+
+
+def apply_trade(holdings: pd.DataFrame, account: str, ticker: str, side: str, quantity: float, price: float,
+                sector: str = "", thesis: str = "", adjust_cash: bool = False) -> tuple[pd.DataFrame, float | None]:
+    """거래 1건을 반영한 새 보유 종목 표와 실현 손익(현지통화, 매수면 None). 원본은 바꾸지 않는다.
+
+    매수: 수량 합산, 평단은 가중평균. 매도: 평단 유지, 수량 0이면 행 삭제.
+    adjust_cash=True 이면 미국 종목 거래 금액을 같은 계좌 CASH 에서 빼거나 더한다.
+    """
+    t = str(ticker).upper().strip()
+    if quantity <= 0 or price <= 0:
+        raise ValueError("수량과 단가는 0보다 커야 합니다.")
+    df = holdings.copy().reset_index(drop=True)
+    m = (df["account"] == account) & (df["ticker"] == t)
+    q0 = float(df.loc[m, "quantity"].sum())
+    realized = None
+
+    if side == "매수":
+        if m.any():
+            i = df.index[m][0]
+            a0 = float(df.at[i, "avg_cost"])
+            df.at[i, "quantity"] = q0 + quantity
+            df.at[i, "avg_cost"] = (q0 * a0 + quantity * price) / (q0 + quantity)
+            for col, val in (("sector", sector), ("thesis", thesis)):
+                if val and not str(df.at[i, col]).strip():
+                    df.at[i, col] = val
+        else:
+            row = pd.DataFrame([[account, t, _market_of(t), quantity, price, sector, thesis]], columns=COLUMNS)
+            df = pd.concat([df, row], ignore_index=True)
+    else:
+        if not m.any():
+            raise ValueError(f"{account}계좌에 보유하지 않은 종목입니다: {t}")
+        if quantity > q0 + 1e-9:
+            raise ValueError(f"매도 수량 {quantity:g} > 보유 수량 {q0:g} ({t})")
+        i = df.index[m][0]
+        realized = (price - float(df.at[i, "avg_cost"])) * quantity
+        left = q0 - quantity
+        df = df.drop(index=i) if left <= 1e-9 else df.assign(quantity=df["quantity"].where(df.index != i, left))
+
+    if adjust_cash and _market_of(t) == "US":
+        amount = quantity * price
+        df = _adjust_cash(df, account, -amount if side == "매수" else amount)
+    return df.reset_index(drop=True), realized
